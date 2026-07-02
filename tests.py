@@ -2,8 +2,10 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import app
+from agent import run_query_agent
 
 
 class BusinessRulesTest(unittest.TestCase):
@@ -82,7 +84,84 @@ class BusinessRulesTest(unittest.TestCase):
     def test_natural_language_query_explains_metric(self):
         result = app.natural_language_query("哪个渠道 SQL 转化率最高？")
         self.assertIn("SQL 转化率最高", result["answer"])
-        self.assertIn("当前存量快照", result["definition"])
+        self.assertIn("线索进入时间", result["definition"])
+
+    def test_current_week_query_has_demo_data(self):
+        result = app.execute_agent_tool(
+            "channel_sql_conversion", {"period": "current_week"}
+        )
+        self.assertTrue(result["rows"])
+        self.assertEqual(result["rows"][0]["channel"], "在线公开课")
+
+    def test_llm_agent_selects_controlled_tool_then_answers(self):
+        responses = iter(
+            [
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "content": None,
+                                "tool_calls": [
+                                    {
+                                        "id": "call-1",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "channel_sql_conversion",
+                                            "arguments": '{"period":"current_week"}',
+                                        },
+                                    }
+                                ],
+                            }
+                        }
+                    ]
+                },
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "content": "本周在线公开课渠道的 SQL 转化率最高。",
+                            }
+                        }
+                    ]
+                },
+            ]
+        )
+
+        def scripted_request(_payload):
+            return next(responses)
+
+        with patch.dict("os.environ", {"AGENT_LLM_MODE": "openai-compatible"}):
+            result = run_query_agent(
+                "本周哪个渠道 SQL 转化率最高？",
+                app.execute_agent_tool,
+                app.natural_language_query,
+                request_fn=scripted_request,
+            )
+        self.assertEqual(result["agent"]["mode"], "llm")
+        self.assertEqual(
+            result["agent"]["tool_calls"][0]["name"],
+            "channel_sql_conversion",
+        )
+        self.assertIn("在线公开课", result["answer"])
+
+    def test_agent_falls_back_without_api_key(self):
+        with patch.dict(
+            "os.environ",
+            {
+                "AGENT_LLM_MODE": "auto",
+                "AGENT_LLM_API_KEY_ENV": "MISSING_TEST_KEY",
+            },
+            clear=False,
+        ):
+            result = run_query_agent(
+                "当前有多少条线索跟进超时？",
+                app.execute_agent_tool,
+                app.natural_language_query,
+            )
+        self.assertEqual(result["agent"]["mode"], "rule-fallback")
+        self.assertIn("超过 48 小时", result["answer"])
 
 
 if __name__ == "__main__":
