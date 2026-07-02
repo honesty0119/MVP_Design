@@ -12,6 +12,8 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+from agent import run_query_agent
+
 ROOT = Path(__file__).resolve().parent
 DB_PATH = ROOT / "leads.db"
 SCHEMA_PATH = ROOT / "schema.sql"
@@ -82,7 +84,9 @@ def seed_leads(conn: sqlite3.Connection) -> None:
         ("13800001010", "活动", "合作方转介", "PENDING_WECHAT", None, 1),
     ]
     for idx, (phone, source, channel, status, invalid_reason, owner_id) in enumerate(samples):
-        created = (now - timedelta(hours=idx * 13)).isoformat()
+        # 保证本周样例中同时存在 MQL 与 SQL，便于演示“本周渠道转化率”。
+        age_hours = [2, 8, 20, 55, 22, 18, 30, 80, 70, 62][idx]
+        created = (now - timedelta(hours=age_hours)).isoformat()
         last_follow = None if idx in (3, 8) else (now - timedelta(hours=idx * 5)).isoformat()
         cur = conn.execute(
             """INSERT INTO leads(phone, source, channel, status, invalid_reason,
@@ -279,23 +283,17 @@ def natural_language_query(question: str) -> dict:
         if "SQL" in q.upper() and ("渠道" in q or "来源" in q) and any(
             word in q for word in ("最高", "最好", "最多")
         ):
-            rows = conn.execute(
-                """SELECT channel,
-                   SUM(CASE WHEN status='SQL' THEN 1 ELSE 0 END) sql_count,
-                   SUM(CASE WHEN status IN ('MQL','SQL') THEN 1 ELSE 0 END) qualified_count
-                   FROM leads GROUP BY channel
-                   HAVING qualified_count > 0
-                   ORDER BY 1.0 * sql_count / qualified_count DESC, qualified_count DESC
-                   LIMIT 5"""
-            ).fetchall()
-            if not rows:
+            period = "current_week" if "本周" in q else "all"
+            data = execute_agent_tool(
+                "channel_sql_conversion", {"period": period}
+            )
+            if not data["rows"]:
                 return {"answer": "当前没有进入 MQL/SQL 的线索，无法计算。", "rows": []}
-            result = [dict(r) for r in rows]
+            result = data["rows"]
             best = result[0]
-            rate = round(best["sql_count"] * 100 / best["qualified_count"], 1)
             return {
-                "answer": f"{best['channel']} 的 SQL 转化率最高，为 {rate}%。",
-                "definition": "SQL 转化率 = SQL 数 /（MQL + SQL 数），按当前存量快照计算。",
+                "answer": f"{best['channel']} 的 SQL 转化率最高，为 {best['sql_rate']}%。",
+                "definition": data["definition"],
                 "rows": result,
             }
         if "超时" in q or ("48" in q and "跟进" in q):
@@ -320,6 +318,67 @@ def natural_language_query(question: str) -> dict:
             "查看各状态漏斗",
         ],
     }
+
+
+def execute_agent_tool(name: str, arguments: dict) -> dict:
+    if name == "channel_sql_conversion":
+        period = arguments["period"]
+        clauses, values = [], []
+        if period == "current_week":
+            now = datetime.now(UTC8)
+            week_start = (now - timedelta(days=now.weekday())).replace(
+                hour=0, minute=0, second=0, microsecond=0
+            )
+            clauses.append("created_at >= ?")
+            values.append(week_start.isoformat())
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        with db() as conn:
+            rows = conn.execute(
+                f"""SELECT channel,
+                    SUM(CASE WHEN status='SQL' THEN 1 ELSE 0 END) sql_count,
+                    SUM(CASE WHEN status IN ('MQL','SQL') THEN 1 ELSE 0 END) qualified_count
+                    FROM leads {where}
+                    GROUP BY channel HAVING qualified_count > 0
+                    ORDER BY 1.0 * sql_count / qualified_count DESC,
+                             qualified_count DESC, channel ASC
+                    LIMIT 10""",
+                values,
+            ).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            item["sql_rate"] = round(
+                item["sql_count"] * 100 / item["qualified_count"], 1
+            )
+            result.append(item)
+        return {
+            "period": period,
+            "rows": result,
+            "definition": "SQL 转化率 = SQL 数 /（MQL + SQL 数）；按线索进入时间筛选。",
+            "data_boundary": "Demo 使用当前状态快照；生产分析应使用状态事件和 cohort。",
+        }
+    if name == "overdue_leads":
+        hours = arguments["hours"]
+        threshold = (datetime.now(UTC8) - timedelta(hours=hours)).isoformat()
+        with db() as conn:
+            count = conn.execute(
+                """SELECT COUNT(*) FROM leads
+                   WHERE status NOT IN ('SQL','INVALID')
+                   AND COALESCE(last_follow_up_at, created_at) < ?""",
+                (threshold,),
+            ).fetchone()[0]
+        return {
+            "hours": hours,
+            "count": count,
+            "definition": "排除 SQL/无效；按最近跟进时间，无跟进则按创建时间。",
+        }
+    if name == "funnel_snapshot":
+        data = funnel()
+        return {
+            **data,
+            "definition": "当前状态存量快照，不是按进入周期计算的 cohort 漏斗。",
+        }
+    raise ValueError(f"不支持的 Agent 工具：{name}")
 
 
 def process_call_callback(data: dict) -> dict:
@@ -470,7 +529,16 @@ class Handler(SimpleHTTPRequestHandler):
                             details.append({"row": i, "error": str(exc)})
                 return self._json({"created": created, "duplicates": duplicates, "errors": errors, "details": details})
             if path == "/api/query":
-                return self._json(natural_language_query(str(data.get("question", ""))))
+                question = str(data.get("question", "")).strip()
+                if not question:
+                    raise ValueError("请输入问题")
+                return self._json(
+                    run_query_agent(
+                        question,
+                        execute_agent_tool,
+                        natural_language_query,
+                    )
+                )
             if path == "/api/callback/call":
                 return self._json(process_call_callback(data))
             return self._json({"error": "接口不存在"}, HTTPStatus.NOT_FOUND)
