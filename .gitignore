@@ -6,3 +6,4 @@ docx_render/
 .DS_Store
 .vscode/
 ~$*
+.env
