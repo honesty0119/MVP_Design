@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+leads.db
+docx_render/
+*.zip
+.DS_Store
+.vscode/
+~$*

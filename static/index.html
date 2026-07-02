@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>市场线索流转台</title>
+  <style>
+    :root{--ink:#162033;--muted:#667085;--line:#e6eaf0;--blue:#315efb;--bg:#f5f7fb;--red:#c92a2a}
+    *{box-sizing:border-box}body{margin:0;font:14px/1.5 system-ui,"Microsoft YaHei",sans-serif;color:var(--ink);background:var(--bg)}
+    header{padding:22px 30px;background:#121b31;color:#fff;display:flex;justify-content:space-between;align-items:center}header h1{font-size:22px;margin:0}header small{color:#aeb8ce}
+    main{max-width:1280px;margin:0 auto;padding:22px}.cards{display:grid;grid-template-columns:repeat(5,1fr);gap:12px}.card,.panel{background:#fff;border:1px solid var(--line);border-radius:12px;box-shadow:0 2px 10px #1620330a}.card{padding:16px}.card b{display:block;font-size:25px;margin-top:5px}.card span{color:var(--muted)}.card.clickable{cursor:pointer}.card.clickable:hover{border-color:#9db0ff}
+    .panel{margin-top:16px;padding:16px}.toolbar{display:flex;gap:8px;flex-wrap:wrap;align-items:center}.toolbar h2{margin:0 auto 0 0;font-size:18px}
+    input,select,button,textarea{font:inherit;border:1px solid #cfd6e1;border-radius:7px;padding:8px 10px;background:#fff}button{cursor:pointer}button.primary{background:var(--blue);color:#fff;border-color:var(--blue)}
+    table{width:100%;border-collapse:collapse;margin-top:12px}th,td{text-align:left;padding:10px;border-bottom:1px solid var(--line)}th{color:var(--muted);font-size:12px}tr:hover{background:#fafbfe}.status{font-size:12px;padding:3px 7px;border-radius:10px;background:#edf2ff;color:#2949c7}.overdue{color:var(--red);font-weight:600}
+    dialog{border:0;border-radius:12px;box-shadow:0 20px 60px #0003;width:min(680px,92vw);padding:0}dialog::backdrop{background:#17203a99}.modal{padding:20px}.modal h3{margin-top:0}.grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}.full{grid-column:1/-1}.timeline{border-left:2px solid var(--line);padding-left:14px}.item{margin:9px 0}.muted{color:var(--muted)}.error{color:var(--red);white-space:pre-wrap}.funnel{display:flex;gap:6px;align-items:center;overflow:auto;margin-top:12px}.stage{background:#f0f3ff;color:#2949c7;border-radius:8px;padding:8px 11px;white-space:nowrap}.arrow{color:#98a2b3}.hint{font-size:12px;color:var(--muted);margin:6px 0}.filebox{border:1px dashed #aeb8c8;border-radius:8px;padding:12px;background:#fafbfc}@media(max-width:800px){.cards{grid-template-columns:1fr 1fr}.hide-sm{display:none}.grid{grid-template-columns:1fr}}
+  </style>
+</head>
+<body>
+<header><div><h1>市场线索流转台</h1><small>从线索进入到 MQL / SQL 的可追溯闭环</small></div><div>演示环境 · 全部为模拟数据</div></header>
+<main>
+  <section class="cards" id="cards"></section>
+  <section class="panel">
+    <div class="toolbar">
+      <h2>线索列表</h2>
+      <input id="q" placeholder="手机号 / 渠道">
+      <select id="status"><option value="">全部状态</option></select>
+      <select id="source"><option value="">全部来源</option></select>
+      <select id="owner"><option value="">全部负责人</option></select>
+      <button onclick="loadLeads()">筛选</button>
+      <button onclick="resetFilters()">重置</button>
+      <button onclick="openImport()">CSV 导入</button>
+      <button class="primary" onclick="openCreate()">新增线索</button>
+    </div>
+    <div class="funnel" id="funnel"></div>
+    <table><thead><tr><th>ID</th><th>手机号</th><th>来源 / 渠道</th><th>状态</th><th>负责人</th><th class="hide-sm">最近跟进</th><th>操作</th></tr></thead><tbody id="rows"></tbody></table>
+  </section>
+</main>
+<dialog id="dialog"><div class="modal" id="modal"></div></dialog>
+<script>
+const LABEL={NEW:"新线索",PENDING_CALL:"待外呼",CONNECTED:"已接通",UNREACHED:"未接通",VALID:"有效",INVALID:"无效",PENDING_WECHAT:"待加微",WECHAT_ADDED:"已加微",MQL:"MQL",SQL:"SQL"};
+let users=[],meta={},overdueOnly=false;
+const qEl=document.getElementById("q"),statusEl=document.getElementById("status"),sourceEl=document.getElementById("source"),ownerEl=document.getElementById("owner");
+async function api(path,opt){const r=await fetch(path,{headers:{"Content-Type":"application/json"},...opt});const d=await r.json();if(!r.ok)throw Error(d.error||"请求失败");return d}
+function esc(s){return String(s??"").replace(/[&<>"']/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[m]))}
+async function init(){[users,meta]=await Promise.all([api("/api/users"),api("/api/meta")]);for(const k of Object.keys(LABEL))statusEl.insertAdjacentHTML("beforeend",`<option value="${k}">${LABEL[k]}</option>`);for(const s of meta.sources)sourceEl.insertAdjacentHTML("beforeend",`<option>${esc(s)}</option>`);for(const u of users)ownerEl.insertAdjacentHTML("beforeend",`<option value="${u.id}">${esc(u.name)}</option>`);await Promise.all([loadFunnel(),loadLeads()])}
+async function loadFunnel(){const d=await api("/api/funnel");const defs=[["总线索",d.total,"当前全部线索"],["有效率",d.valid_rate+"%","有效及后续 / 总线索"],["MQL 转化率",d.mql_rate+"%","MQL+SQL / 有效及后续"],["SQL 转化率",d.sql_rate+"%","SQL / MQL+SQL"],["超 48h 未跟进",d.overdue,"点击仅看超时线索"]];cards.innerHTML=defs.map((x,i)=>`<div class="card ${i===4?"clickable":""}" title="${x[2]}" ${i===4?'onclick="toggleOverdue()"':""}><span>${x[0]}</span><b>${x[1]}</b><small class="muted">${x[2]}</small></div>`).join("");const order=["NEW","PENDING_CALL","CONNECTED","VALID","PENDING_WECHAT","WECHAT_ADDED","MQL","SQL"];funnel.innerHTML=order.map((s,i)=>`${i?'<span class="arrow">→</span>':""}<span class="stage">${LABEL[s]} <b>${d.counts[s]||0}</b></span>`).join("")}
+function fmtTime(s){if(!s)return "—";return new Intl.DateTimeFormat("zh-CN",{month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit",hour12:false}).format(new Date(s))}
+async function loadLeads(){const p=new URLSearchParams({q:qEl.value,status:statusEl.value,source:sourceEl.value,owner_id:ownerEl.value,overdue:overdueOnly?"1":""});const data=await api("/api/leads?"+p);rows.innerHTML=data.map(x=>`<tr><td>${x.id}</td><td>${esc(x.phone)}</td><td>${esc(x.source)}<br><span class="muted">${esc(x.channel)}</span></td><td><span class="status">${LABEL[x.status]}</span>${x.overdue?'<br><span class="overdue">跟进超时</span>':""}</td><td>${esc(x.owner_name||"未分配")}</td><td class="hide-sm">${fmtTime(x.last_follow_up_at)}</td><td><button onclick="detail(${x.id})">详情 / 操作</button></td></tr>`).join("")||'<tr><td colspan="7" class="muted">没有符合条件的线索</td></tr>'}
+function toggleOverdue(){overdueOnly=!overdueOnly;loadLeads()}
+function resetFilters(){qEl.value=statusEl.value=sourceEl.value=ownerEl.value="";overdueOnly=false;loadLeads()}
+function show(html){modal.innerHTML=html;dialog.showModal()}
+function closeDlg(){dialog.close()}
+function openCreate(){show(`<h3>新增模拟线索</h3><div class="grid"><input id="cPhone" placeholder="11 位模拟手机号"><input id="cSource" placeholder="来源，如 信息流"><input id="cChannel" class="full" placeholder="渠道，如 抖音-暑期营"></div><p id="err" class="error"></p><button onclick="closeDlg()">取消</button> <button class="primary" onclick="createLead()">保存</button>`)}
+function openImport(){show(`<h3>CSV 批量导入</h3><p class="hint">表头必须为 phone,source,channel；单次最多 500 条。手机号重复时保留原记录，不覆盖原归因。</p><div class="filebox"><input id="csvFile" type="file" accept=".csv,text/csv"></div><p id="result" class="muted"></p><p id="err" class="error"></p><button onclick="closeDlg()">关闭</button> <button class="primary" onclick="importCsv()">开始导入</button>`)}
+async function importCsv(){try{const f=csvFile.files[0];if(!f)throw Error("请先选择 CSV 文件");const lines=(await f.text()).replace(/^\uFEFF/,"").trim().split(/\r?\n/);const heads=lines.shift().split(",").map(x=>x.trim());if(heads.join(",")!=="phone,source,channel")throw Error("CSV 表头必须为 phone,source,channel");const data=lines.filter(Boolean).map(line=>{const v=line.split(",").map(x=>x.trim());return {phone:v[0],source:v[1],channel:v[2]}});const d=await api("/api/import",{method:"POST",body:JSON.stringify({rows:data})});result.textContent=`新增 ${d.created} 条，重复 ${d.duplicates} 条，错误 ${d.errors} 条`;await Promise.all([loadFunnel(),loadLeads()])}catch(e){err.textContent=e.message}}
+async function createLead(){try{await api("/api/leads",{method:"POST",body:JSON.stringify({phone:cPhone.value,source:cSource.value,channel:cChannel.value})});closeDlg();await Promise.all([loadFunnel(),loadLeads()])}catch(e){err.textContent=e.message}}
+async function detail(id){const d=await api("/api/leads/"+id);const next=meta.transitions[d.status]||[];show(`<h3>线索 #${id} · ${esc(d.phone)}</h3><p>${esc(d.source)} / ${esc(d.channel)} · <span class="status">${LABEL[d.status]}</span></p><div class="grid"><select id="dOwner">${users.map(u=>`<option value="${u.id}" ${u.id==d.owner_id?"selected":""}>${esc(u.name)}</option>`).join("")}</select><button onclick="assign(${id})">分配负责人</button><textarea id="follow" class="full" placeholder="记录本次沟通结果与下一步动作"></textarea><button class="full" onclick="followUp(${id})">新增跟进记录</button><select id="nextStatus">${next.map(s=>`<option value="${s}">${LABEL[s]}</option>`).join("")||'<option value="">当前无后续状态</option>'}</select><input id="reason" placeholder="无效原因 / 商机说明 / 变更备注"><p class="full hint">MQL：须已分配负责人且至少有一次跟进；SQL：必须由 MQL 转化并填写明确商机说明。</p><button class="full primary" onclick="changeStatus(${id})">提交状态变更</button></div><p id="err" class="error"></p><h4>跟进记录</h4><div class="timeline">${d.follow_ups.map(x=>`<div class="item"><b>${esc(x.operator_name)}</b> · ${fmtTime(x.created_at)}<br>${esc(x.content)}</div>`).join("")||'<span class="muted">暂无</span>'}</div><h4>状态历史</h4><div class="timeline">${d.history.map(x=>`<div class="item">${x.from_status?LABEL[x.from_status]+" → ":""}<b>${LABEL[x.to_status]}</b> · ${fmtTime(x.changed_at)}<br><span class="muted">${esc(x.note||"")}</span></div>`).join("")}</div><p><button onclick="closeDlg()">关闭</button></p>`)}
+async function assign(id){try{await api(`/api/leads/${id}/assign`,{method:"POST",body:JSON.stringify({owner_id:+dOwner.value})});await detail(id);loadLeads()}catch(e){err.textContent=e.message}}
+async function followUp(id){try{await api(`/api/leads/${id}/follow-ups`,{method:"POST",body:JSON.stringify({content:follow.value})});await detail(id);loadLeads();loadFunnel()}catch(e){err.textContent=e.message}}
+async function changeStatus(id){try{const s=nextStatus.value;await api(`/api/leads/${id}/status`,{method:"POST",body:JSON.stringify({status:s,note:reason.value,invalid_reason:s==="INVALID"?reason.value:null,opportunity_note:s==="SQL"?reason.value:null})});await detail(id);loadLeads();loadFunnel()}catch(e){err.textContent=e.message}}
+dialog.addEventListener("click",e=>{if(e.target===dialog)closeDlg()});qEl.addEventListener("keydown",e=>{if(e.key==="Enter")loadLeads()});init();
+</script>
+</body></html>
