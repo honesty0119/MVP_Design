@@ -270,6 +270,58 @@ def funnel() -> dict:
     }
 
 
+def natural_language_query(question: str) -> dict:
+    """Small, explainable rule-query layer; deliberately does not pretend to be an LLM."""
+    q = question.strip()
+    if not q:
+        raise ValueError("请输入问题")
+    with db() as conn:
+        if "SQL" in q.upper() and ("渠道" in q or "来源" in q) and any(
+            word in q for word in ("最高", "最好", "最多")
+        ):
+            rows = conn.execute(
+                """SELECT channel,
+                   SUM(CASE WHEN status='SQL' THEN 1 ELSE 0 END) sql_count,
+                   SUM(CASE WHEN status IN ('MQL','SQL') THEN 1 ELSE 0 END) qualified_count
+                   FROM leads GROUP BY channel
+                   HAVING qualified_count > 0
+                   ORDER BY 1.0 * sql_count / qualified_count DESC, qualified_count DESC
+                   LIMIT 5"""
+            ).fetchall()
+            if not rows:
+                return {"answer": "当前没有进入 MQL/SQL 的线索，无法计算。", "rows": []}
+            result = [dict(r) for r in rows]
+            best = result[0]
+            rate = round(best["sql_count"] * 100 / best["qualified_count"], 1)
+            return {
+                "answer": f"{best['channel']} 的 SQL 转化率最高，为 {rate}%。",
+                "definition": "SQL 转化率 = SQL 数 /（MQL + SQL 数），按当前存量快照计算。",
+                "rows": result,
+            }
+        if "超时" in q or ("48" in q and "跟进" in q):
+            count = funnel()["overdue"]
+            return {
+                "answer": f"当前有 {count} 条线索超过 48 小时未跟进。",
+                "definition": "排除 SQL/无效；按最近跟进时间，无跟进则按创建时间。",
+                "action": {"label": "查看超时线索", "filter": "overdue"},
+            }
+        if "漏斗" in q or "各状态" in q:
+            data = funnel()
+            return {
+                "answer": "已返回当前线索漏斗快照。",
+                "definition": "这是当前存量快照，不是按进入周期计算的 cohort 漏斗。",
+                "rows": [{"status": k, "count": v} for k, v in data["counts"].items()],
+            }
+    return {
+        "answer": "当前规则查询暂不支持这个问题。",
+        "suggestions": [
+            "哪个渠道 SQL 转化率最高？",
+            "当前有多少条线索跟进超时？",
+            "查看各状态漏斗",
+        ],
+    }
+
+
 def process_call_callback(data: dict) -> dict:
     """Persist a third-party call event once and apply only a legal call-state change."""
     event_id = str(data.get("event_id", "")).strip()
@@ -417,6 +469,8 @@ class Handler(SimpleHTTPRequestHandler):
                             errors += 1
                             details.append({"row": i, "error": str(exc)})
                 return self._json({"created": created, "duplicates": duplicates, "errors": errors, "details": details})
+            if path == "/api/query":
+                return self._json(natural_language_query(str(data.get("question", ""))))
             if path == "/api/callback/call":
                 return self._json(process_call_callback(data))
             return self._json({"error": "接口不存在"}, HTTPStatus.NOT_FOUND)
