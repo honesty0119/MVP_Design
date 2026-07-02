@@ -34,6 +34,7 @@ python -m unittest -v
 - MQL/SQL 准入校验
 - 漏斗、转化率、48 小时未跟进提醒
 - 可视化状态漏斗、指标口径说明、超时线索一键筛选
+- 可解释的自然语言规则查询，例如“哪个渠道 SQL 转化率最高？”
 - CSV 页面导入与去重、CSV 导出 API
 - 具备事件幂等性与防回滚边界的模拟外呼回调
 
@@ -54,6 +55,7 @@ python -m unittest -v
 - `业务设计文档.docx`：2–4 页业务设计
 - `AI-coding使用说明.md`：AI 参与、问题、人工修正及迭代计划
 - `项目复盘与改进说明.md`：截图复盘、改进理由与仍未覆盖的生产边界
+- `演示脚本.md`：3–5 分钟现场演示顺序与讲解要点
 
 ## API 摘要
 
@@ -64,6 +66,7 @@ python -m unittest -v
 - `POST /api/leads/{id}/status`
 - `GET /api/funnel`
 - `POST /api/import`（JSON rows，单次最多 500 条）
+- `POST /api/query`（受控的自然语言规则查询，不执行任意 SQL）
 - `POST /api/callback/call`（按 `event_id` 幂等）
 - `GET /api/export.csv`
 
