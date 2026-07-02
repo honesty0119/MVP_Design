@@ -20,6 +20,14 @@
   <section class="cards" id="cards"></section>
   <section class="panel">
     <div class="toolbar">
+      <h2>业务问答</h2>
+      <input id="question" style="min-width:320px" value="哪个渠道 SQL 转化率最高？" aria-label="业务问题">
+      <button class="primary" onclick="askQuestion()">查询</button>
+    </div>
+    <div id="answer" class="hint">采用可解释的规则查询，不会执行任意 SQL。</div>
+  </section>
+  <section class="panel">
+    <div class="toolbar">
       <h2>线索列表</h2>
       <input id="q" placeholder="手机号 / 渠道">
       <select id="status"><option value="">全部状态</option></select>
@@ -39,6 +47,7 @@
 const LABEL={NEW:"新线索",PENDING_CALL:"待外呼",CONNECTED:"已接通",UNREACHED:"未接通",VALID:"有效",INVALID:"无效",PENDING_WECHAT:"待加微",WECHAT_ADDED:"已加微",MQL:"MQL",SQL:"SQL"};
 let users=[],meta={},overdueOnly=false;
 const qEl=document.getElementById("q"),statusEl=document.getElementById("status"),sourceEl=document.getElementById("source"),ownerEl=document.getElementById("owner");
+const questionEl=document.getElementById("question"),answerEl=document.getElementById("answer");
 async function api(path,opt){const r=await fetch(path,{headers:{"Content-Type":"application/json"},...opt});const d=await r.json();if(!r.ok)throw Error(d.error||"请求失败");return d}
 function esc(s){return String(s??"").replace(/[&<>"']/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[m]))}
 async function init(){[users,meta]=await Promise.all([api("/api/users"),api("/api/meta")]);for(const k of Object.keys(LABEL))statusEl.insertAdjacentHTML("beforeend",`<option value="${k}">${LABEL[k]}</option>`);for(const s of meta.sources)sourceEl.insertAdjacentHTML("beforeend",`<option>${esc(s)}</option>`);for(const u of users)ownerEl.insertAdjacentHTML("beforeend",`<option value="${u.id}">${esc(u.name)}</option>`);await Promise.all([loadFunnel(),loadLeads()])}
@@ -47,6 +56,7 @@ function fmtTime(s){if(!s)return "—";return new Intl.DateTimeFormat("zh-CN",{m
 async function loadLeads(){const p=new URLSearchParams({q:qEl.value,status:statusEl.value,source:sourceEl.value,owner_id:ownerEl.value,overdue:overdueOnly?"1":""});const data=await api("/api/leads?"+p);rows.innerHTML=data.map(x=>`<tr><td>${x.id}</td><td>${esc(x.phone)}</td><td>${esc(x.source)}<br><span class="muted">${esc(x.channel)}</span></td><td><span class="status">${LABEL[x.status]}</span>${x.overdue?'<br><span class="overdue">跟进超时</span>':""}</td><td>${esc(x.owner_name||"未分配")}</td><td class="hide-sm">${fmtTime(x.last_follow_up_at)}</td><td><button onclick="detail(${x.id})">详情 / 操作</button></td></tr>`).join("")||'<tr><td colspan="7" class="muted">没有符合条件的线索</td></tr>'}
 function toggleOverdue(){overdueOnly=!overdueOnly;loadLeads()}
 function resetFilters(){qEl.value=statusEl.value=sourceEl.value=ownerEl.value="";overdueOnly=false;loadLeads()}
+async function askQuestion(){try{const d=await api("/api/query",{method:"POST",body:JSON.stringify({question:questionEl.value})});answerEl.innerHTML=`<b>${esc(d.answer)}</b>${d.definition?`<br>${esc(d.definition)}`:""}${d.action?` <button onclick="toggleOverdue()">${esc(d.action.label)}</button>`:""}`}catch(e){answerEl.textContent=e.message}}
 function show(html){modal.innerHTML=html;dialog.showModal()}
 function closeDlg(){dialog.close()}
 function openCreate(){show(`<h3>新增模拟线索</h3><div class="grid"><input id="cPhone" placeholder="11 位模拟手机号"><input id="cSource" placeholder="来源，如 信息流"><input id="cChannel" class="full" placeholder="渠道，如 抖音-暑期营"></div><p id="err" class="error"></p><button onclick="closeDlg()">取消</button> <button class="primary" onclick="createLead()">保存</button>`)}
@@ -57,6 +67,6 @@ async function detail(id){const d=await api("/api/leads/"+id);const next=meta.tr
 async function assign(id){try{await api(`/api/leads/${id}/assign`,{method:"POST",body:JSON.stringify({owner_id:+dOwner.value})});await detail(id);loadLeads()}catch(e){err.textContent=e.message}}
 async function followUp(id){try{await api(`/api/leads/${id}/follow-ups`,{method:"POST",body:JSON.stringify({content:follow.value})});await detail(id);loadLeads();loadFunnel()}catch(e){err.textContent=e.message}}
 async function changeStatus(id){try{const s=nextStatus.value;await api(`/api/leads/${id}/status`,{method:"POST",body:JSON.stringify({status:s,note:reason.value,invalid_reason:s==="INVALID"?reason.value:null,opportunity_note:s==="SQL"?reason.value:null})});await detail(id);loadLeads();loadFunnel()}catch(e){err.textContent=e.message}}
-dialog.addEventListener("click",e=>{if(e.target===dialog)closeDlg()});qEl.addEventListener("keydown",e=>{if(e.key==="Enter")loadLeads()});init();
+dialog.addEventListener("click",e=>{if(e.target===dialog)closeDlg()});qEl.addEventListener("keydown",e=>{if(e.key==="Enter")loadLeads()});questionEl.addEventListener("keydown",e=>{if(e.key==="Enter")askQuestion()});init();
 </script>
 </body></html>
