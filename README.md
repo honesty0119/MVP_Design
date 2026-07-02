@@ -34,7 +34,8 @@ python -m unittest -v
 - MQL/SQL 准入校验
 - 漏斗、转化率、48 小时未跟进提醒
 - 可视化状态漏斗、指标口径说明、超时线索一键筛选
-- 可解释的自然语言规则查询，例如“哪个渠道 SQL 转化率最高？”
+- OpenAI-compatible LLM Agent：模型选择受控数据工具并基于真实结果回答
+- 未配置密钥或模型故障时自动回退规则查询，Demo 不失效
 - CSV 页面导入与去重、CSV 导出 API
 - 具备事件幂等性与防回滚边界的模拟外呼回调
 
@@ -49,6 +50,7 @@ python -m unittest -v
 ## 技术与目录
 
 - `app.py`：Python 标准库 HTTP 服务、API、SQLite 访问与业务规则
+- `agent.py`：LLM → Tool Calling → 工具结果回填 → 最终回答的 Agent 循环
 - `static/index.html`：原生 HTML/CSS/JS 单页界面
 - `schema.sql`：数据模型与索引
 - `tests.py`：关键边界测试
@@ -77,3 +79,25 @@ python -m unittest -v
 - 无效线索可“重新打开”仅用于演示纠错，且强制填写原因；生产环境应再校验主管权限并写审计人。
 - 转化率采用当前存量快照口径，适合 Demo；经营分析应使用按进入时间分 cohort 的口径，避免跨周期分母失真。
 - 三方回调已演示事件落库、去重与合法状态推进；生产环境还需签名验真、重试队列、死信、乱序版本和字段映射版本。
+
+## 接入真实 LLM Agent
+
+本项目兼容 OpenAI `/chat/completions` 与 Tool Calling 协议，不增加第三方 Python 依赖。密钥只从操作系统环境变量读取。
+
+PowerShell 示例：
+
+```powershell
+$env:AGENT_LLM_MODE="openai-compatible"
+$env:AGENT_LLM_BASE_URL="https://dashscope.aliyuncs.com/compatible-mode/v1"
+$env:AGENT_LLM_MODEL="qwen-plus"
+$env:OPENAI_API_KEY="你的密钥"
+python app.py
+```
+
+也可参照 `.env.example` 切换到其他 OpenAI-compatible 服务。Agent 只开放三个查询工具：
+
+- `channel_sql_conversion`
+- `overdue_leads`
+- `funnel_snapshot`
+
+模型无法执行任意 SQL。若未配置密钥，`auto` 模式会自动使用规则回退，并在页面标注实际执行模式。
