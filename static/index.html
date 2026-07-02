@@ -20,11 +20,11 @@
   <section class="cards" id="cards"></section>
   <section class="panel">
     <div class="toolbar">
-      <h2>业务问答</h2>
-      <input id="question" style="min-width:320px" value="哪个渠道 SQL 转化率最高？" aria-label="业务问题">
+      <h2>线索分析 Agent</h2>
+      <input id="question" style="min-width:320px" value="本周哪个渠道 SQL 转化率最高？" aria-label="业务问题">
       <button class="primary" onclick="askQuestion()">查询</button>
     </div>
-    <div id="answer" class="hint">采用可解释的规则查询，不会执行任意 SQL。</div>
+    <div id="answer" class="hint">配置 LLM 后由模型选择受控数据工具；未配置密钥时自动使用规则回退。不会执行任意 SQL。</div>
   </section>
   <section class="panel">
     <div class="toolbar">
@@ -56,7 +56,7 @@ function fmtTime(s){if(!s)return "—";return new Intl.DateTimeFormat("zh-CN",{m
 async function loadLeads(){const p=new URLSearchParams({q:qEl.value,status:statusEl.value,source:sourceEl.value,owner_id:ownerEl.value,overdue:overdueOnly?"1":""});const data=await api("/api/leads?"+p);rows.innerHTML=data.map(x=>`<tr><td>${x.id}</td><td>${esc(x.phone)}</td><td>${esc(x.source)}<br><span class="muted">${esc(x.channel)}</span></td><td><span class="status">${LABEL[x.status]}</span>${x.overdue?'<br><span class="overdue">跟进超时</span>':""}</td><td>${esc(x.owner_name||"未分配")}</td><td class="hide-sm">${fmtTime(x.last_follow_up_at)}</td><td><button onclick="detail(${x.id})">详情 / 操作</button></td></tr>`).join("")||'<tr><td colspan="7" class="muted">没有符合条件的线索</td></tr>'}
 function toggleOverdue(){overdueOnly=!overdueOnly;loadLeads()}
 function resetFilters(){qEl.value=statusEl.value=sourceEl.value=ownerEl.value="";overdueOnly=false;loadLeads()}
-async function askQuestion(){try{const d=await api("/api/query",{method:"POST",body:JSON.stringify({question:questionEl.value})});answerEl.innerHTML=`<b>${esc(d.answer)}</b>${d.definition?`<br>${esc(d.definition)}`:""}${d.action?` <button onclick="toggleOverdue()">${esc(d.action.label)}</button>`:""}`}catch(e){answerEl.textContent=e.message}}
+async function askQuestion(){try{const d=await api("/api/query",{method:"POST",body:JSON.stringify({question:questionEl.value})});const mode=d.agent?.mode==="llm"?"LLM Agent":"规则回退";const tools=(d.agent?.tool_calls||[]).map(x=>x.name).join("、");answerEl.innerHTML=`<b>${esc(d.answer)}</b><br><span class="muted">执行模式：${mode}${tools?` · 工具：${esc(tools)}`:""}</span>${d.definition?`<br>${esc(d.definition)}`:""}${d.action?` <button onclick="toggleOverdue()">${esc(d.action.label)}</button>`:""}`}catch(e){answerEl.textContent=e.message}}
 function show(html){modal.innerHTML=html;dialog.showModal()}
 function closeDlg(){dialog.close()}
 function openCreate(){show(`<h3>新增模拟线索</h3><div class="grid"><input id="cPhone" placeholder="11 位模拟手机号"><input id="cSource" placeholder="来源，如 信息流"><input id="cChannel" class="full" placeholder="渠道，如 抖音-暑期营"></div><p id="err" class="error"></p><button onclick="closeDlg()">取消</button> <button class="primary" onclick="createLead()">保存</button>`)}
