@@ -48,3 +48,14 @@ CREATE TABLE IF NOT EXISTS callback_events (
   payload TEXT NOT NULL,
   received_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS audit_logs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  lead_id INTEGER REFERENCES leads(id),
+  actor_id INTEGER REFERENCES users(id),
+  action TEXT NOT NULL,
+  detail TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_audit_logs_lead ON audit_logs(lead_id);

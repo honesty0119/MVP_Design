@@ -131,7 +131,15 @@ def run_query_agent(
     api_key_env = os.getenv("AGENT_LLM_API_KEY_ENV", "OPENAI_API_KEY")
     if mode == "rule" or (mode == "auto" and not os.getenv(api_key_env)):
         result = fallback(question)
-        result["agent"] = {"mode": "rule-fallback", "tool_calls": []}
+        result["agent"] = {
+            "mode": "rule-fallback",
+            "tool_calls": [],
+            "trace": [
+                {"step": "收到问题", "detail": question},
+                {"step": "选择执行模式", "detail": "未配置 LLM 密钥或主动设置规则模式，使用确定性规则查询。"},
+                {"step": "安全边界", "detail": "没有把用户问题转换成任意 SQL。"},
+            ],
+        }
         return result
 
     request_fn = request_fn or _http_request
@@ -176,12 +184,25 @@ def run_query_agent(
         return {
             "answer": answer,
             "definition": executed[0]["result"].get("definition", ""),
+            "data_boundary": executed[0]["result"].get("data_boundary", ""),
             "agent": {
                 "mode": "llm",
                 "model": os.getenv("AGENT_LLM_MODEL", "qwen-plus"),
                 "tool_calls": [
                     {"name": item["name"], "arguments": item["arguments"]}
                     for item in executed
+                ],
+                "trace": [
+                    {"step": "收到问题", "detail": question},
+                    {
+                        "step": "模型选择工具",
+                        "detail": "；".join(
+                            f"{item['name']}({json.dumps(item['arguments'], ensure_ascii=False)})"
+                            for item in executed
+                        ),
+                    },
+                    {"step": "服务端校验", "detail": "只允许 JSON Schema 内的参数，并执行预定义参数化查询。"},
+                    {"step": "结果回填", "detail": "把真实工具结果发回模型，由模型生成最终业务回答。"},
                 ],
             },
         }
@@ -191,5 +212,10 @@ def run_query_agent(
             "mode": "rule-fallback",
             "fallback_reason": str(exc),
             "tool_calls": [],
+            "trace": [
+                {"step": "收到问题", "detail": question},
+                {"step": "LLM 调用失败", "detail": str(exc)},
+                {"step": "自动降级", "detail": "回退到确定性规则查询，保证 Demo 不因模型或网络不可用而中断。"},
+            ],
         }
         return result

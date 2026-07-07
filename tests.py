@@ -36,6 +36,32 @@ class BusinessRulesTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "无效原因"):
             app.update_status(lead_id, {"status": "INVALID"})
 
+    def test_qualification_explains_mql_blockers_and_readiness(self):
+        detail = app.lead_detail(4)
+        self.assertFalse(detail["qualification"]["can_mql"])
+        self.assertIn("至少需要一条跟进记录", detail["qualification"]["blockers"])
+
+        with app.db() as conn:
+            ts = app.now_iso()
+            conn.execute(
+                "INSERT INTO follow_ups(lead_id, operator_id, content, created_at) VALUES (4, 1, ?, ?)",
+                ("已确认需求，客户愿意继续沟通", ts),
+            )
+            conn.execute("UPDATE leads SET last_follow_up_at=?, updated_at=? WHERE id=4", (ts, ts))
+        detail = app.lead_detail(4)
+        self.assertTrue(detail["qualification"]["can_mql"])
+        self.assertTrue(detail["qualification"]["suggested_mql"])
+        self.assertGreaterEqual(detail["qualification"]["score"], 70)
+
+    def test_sales_cannot_operate_other_owner_lead(self):
+        lead_id, _ = app.create_lead({"phone": "13800007666", "source": "测试", "channel": "A"})
+        with app.db() as conn:
+            conn.execute("UPDATE leads SET owner_id=1 WHERE id=?", (lead_id,))
+        with self.assertRaisesRegex(PermissionError, "销售只能操作自己负责的线索"):
+            app.update_status(lead_id, {"status": "PENDING_CALL", "actor_id": 2})
+        app.update_status(lead_id, {"status": "PENDING_CALL", "actor_id": 1})
+        self.assertEqual(app.lead_detail(lead_id)["status"], "PENDING_CALL")
+
     def test_call_callback_is_idempotent_and_cannot_roll_back(self):
         lead_id, _ = app.create_lead({"phone": "13800006666", "source": "测试", "channel": "A"})
         app.update_status(lead_id, {"status": "PENDING_CALL"})
@@ -144,6 +170,8 @@ class BusinessRulesTest(unittest.TestCase):
             result["agent"]["tool_calls"][0]["name"],
             "channel_sql_conversion",
         )
+        self.assertIn("服务端校验", [item["step"] for item in result["agent"]["trace"]])
+        self.assertIn("Demo 使用当前状态快照", result["data_boundary"])
         self.assertIn("在线公开课", result["answer"])
 
     def test_agent_falls_back_without_api_key(self):

@@ -33,6 +33,18 @@ ALLOWED_TRANSITIONS = {
     "INVALID": {"NEW"},  # 仅允许主管式“重新打开”，Demo 中要求填写原因
 }
 
+HIGH_INTENT_KEYWORDS = ("公开课", "转介", "课程词", "官网", "线下沙龙", "品牌词")
+LOW_INTENT_KEYWORDS = ("低价", "资料包", "菜单")
+CONTACT_READY_STATUSES = {
+    "CONNECTED",
+    "VALID",
+    "PENDING_WECHAT",
+    "WECHAT_ADDED",
+    "MQL",
+    "SQL",
+}
+MQL_READY_STATUSES = {"VALID", "PENDING_WECHAT", "WECHAT_ADDED", "MQL", "SQL"}
+
 
 def now_iso() -> str:
     return datetime.now(UTC8).replace(microsecond=0).isoformat()
@@ -117,6 +129,161 @@ def row_dict(row: sqlite3.Row | None) -> dict | None:
     return dict(row) if row else None
 
 
+def is_overdue(lead: dict | sqlite3.Row, hours: int = 48) -> bool:
+    if lead["status"] in {"SQL", "INVALID"}:
+        return False
+    base = lead["last_follow_up_at"] or lead["created_at"]
+    return base < (datetime.now(UTC8) - timedelta(hours=hours)).isoformat()
+
+
+def channel_intent_score(source: str, channel: str) -> tuple[int, str]:
+    text = f"{source} {channel}"
+    if any(word in text for word in HIGH_INTENT_KEYWORDS):
+        return 20, "渠道意向较强"
+    if any(word in text for word in LOW_INTENT_KEYWORDS):
+        return 5, "渠道偏泛流量，需要二次确认需求"
+    return 10, "渠道意向中等，需通过跟进确认"
+
+
+def lead_qualification(lead: dict | sqlite3.Row) -> dict:
+    """Return an explainable, non-destructive qualification score for the UI.
+
+    The score is advisory: the hard MQL/SQL gates still live in update_status.
+    This keeps the Demo close to the assignment while showing how production
+    scoring could be layered on top of a state machine.
+    """
+    lead = dict(lead)
+    if lead["status"] == "INVALID":
+        return {
+            "score": 0,
+            "level": "无效",
+            "can_mql": False,
+            "suggested_mql": False,
+            "summary": "已标记无效，除非主管复核重新打开，否则不进入 MQL 判断。",
+            "breakdown": [{"label": "无效线索", "points": 0, "reason": lead.get("invalid_reason") or "已退出当前漏斗"}],
+            "blockers": ["无效线索需主管复核后才能重新打开"],
+        }
+
+    breakdown: list[dict] = []
+    score = 0
+
+    contact_points = 25 if lead["status"] in CONTACT_READY_STATUSES else 5 if lead["status"] in {"PENDING_CALL", "UNREACHED"} else 0
+    score += contact_points
+    breakdown.append(
+        {
+            "label": "联系方式有效性",
+            "points": contact_points,
+            "reason": "已接通或进入有效后续阶段" if contact_points == 25 else "仍需外呼确认",
+        }
+    )
+
+    owner_points = 15 if lead.get("owner_id") else 0
+    score += owner_points
+    breakdown.append(
+        {
+            "label": "责任归属",
+            "points": owner_points,
+            "reason": "已有负责人" if owner_points else "未分配负责人",
+        }
+    )
+
+    follow_points = 20 if lead.get("last_follow_up_at") else 0
+    score += follow_points
+    breakdown.append(
+        {
+            "label": "跟进事实",
+            "points": follow_points,
+            "reason": "已有跟进记录" if follow_points else "还没有跟进记录",
+        }
+    )
+
+    intent_points, intent_reason = channel_intent_score(lead["source"], lead["channel"])
+    score += intent_points
+    breakdown.append({"label": "渠道意向", "points": intent_points, "reason": intent_reason})
+
+    wechat_points = 10 if lead["status"] in {"WECHAT_ADDED", "MQL", "SQL"} else 5 if lead["status"] == "PENDING_WECHAT" else 0
+    score += wechat_points
+    breakdown.append(
+        {
+            "label": "私域承接",
+            "points": wechat_points,
+            "reason": "已加微" if wechat_points == 10 else "待加微" if wechat_points == 5 else "尚未进入私域承接",
+        }
+    )
+
+    timely_points = 10 if not is_overdue(lead) else 0
+    score += timely_points
+    breakdown.append(
+        {
+            "label": "跟进时效",
+            "points": timely_points,
+            "reason": "未超过 48 小时未跟进" if timely_points else "超过 48 小时未跟进",
+        }
+    )
+
+    blockers = []
+    if lead["status"] not in MQL_READY_STATUSES:
+        blockers.append("需先完成有效性判断，不能从当前状态直接进入 MQL")
+    if not lead.get("owner_id"):
+        blockers.append("需先分配负责人")
+    if not lead.get("last_follow_up_at"):
+        blockers.append("至少需要一条跟进记录")
+    can_mql = not blockers
+    suggested_mql = can_mql and score >= 70
+    level = "高意向" if score >= 80 else "可培育" if score >= 60 else "待确认"
+    summary = (
+        "硬性准入已满足，评分也达到建议阈值，可考虑转 MQL。"
+        if suggested_mql
+        else "硬性准入满足，但评分未达建议阈值，建议继续补充需求/预算/下一步。"
+        if can_mql
+        else "暂不建议转 MQL：需要先补齐准入条件。"
+    )
+    return {
+        "score": min(score, 100),
+        "level": level,
+        "can_mql": can_mql,
+        "suggested_mql": suggested_mql,
+        "summary": summary,
+        "breakdown": breakdown,
+        "blockers": blockers,
+    }
+
+
+def get_actor(conn: sqlite3.Connection, data: dict | None = None) -> sqlite3.Row:
+    actor_id = (data or {}).get("actor_id")
+    if actor_id:
+        actor = conn.execute("SELECT * FROM users WHERE id=?", (actor_id,)).fetchone()
+        if not actor:
+            raise ValueError("操作人不存在")
+        return actor
+    actor = conn.execute("SELECT * FROM users WHERE role='manager' ORDER BY id LIMIT 1").fetchone()
+    if not actor:
+        actor = conn.execute("SELECT * FROM users ORDER BY id LIMIT 1").fetchone()
+    if not actor:
+        raise ValueError("系统缺少操作人")
+    return actor
+
+
+def ensure_lead_permission(lead: sqlite3.Row, actor: sqlite3.Row, action: str, new_owner_id: int | None = None) -> None:
+    if actor["role"] == "manager":
+        return
+    owner_id = lead["owner_id"]
+    if action == "assign":
+        if owner_id is None and new_owner_id == actor["id"]:
+            return
+        raise PermissionError("销售只能认领未分配线索；转移负责人需主管操作")
+    if action in {"follow_up", "status"} and owner_id == actor["id"]:
+        return
+    raise PermissionError("销售只能操作自己负责的线索；跨负责人操作需主管处理")
+
+
+def audit(conn: sqlite3.Connection, lead_id: int | None, actor_id: int | None, action: str, detail: str) -> None:
+    conn.execute(
+        "INSERT INTO audit_logs(lead_id, actor_id, action, detail, created_at) VALUES (?, ?, ?, ?, ?)",
+        (lead_id, actor_id, action, detail, now_iso()),
+    )
+
+
 def list_leads(params: dict[str, list[str]]) -> list[dict]:
     clauses, values = [], []
     for key in ("status", "source", "owner_id"):
@@ -144,7 +311,12 @@ def list_leads(params: dict[str, list[str]]) -> list[dict]:
             {where} ORDER BY l.updated_at DESC, l.id DESC""",
             [(datetime.now(UTC8) - timedelta(hours=48)).isoformat(), *values],
         ).fetchall()
-    return [dict(r) for r in rows]
+    result = []
+    for row in rows:
+        item = dict(row)
+        item["qualification"] = lead_qualification(item)
+        result.append(item)
+    return result
 
 
 def lead_detail(lead_id: int) -> dict | None:
@@ -171,6 +343,16 @@ def lead_detail(lead_id: int) -> dict | None:
                 (lead_id,),
             )
         ]
+        lead["audit_logs"] = [
+            dict(r)
+            for r in conn.execute(
+                """SELECT a.*, u.name actor_name, u.role actor_role
+                   FROM audit_logs a LEFT JOIN users u ON u.id=a.actor_id
+                   WHERE lead_id=? ORDER BY created_at DESC, id DESC LIMIT 20""",
+                (lead_id,),
+            )
+        ]
+        lead["qualification"] = lead_qualification(lead)
         return lead
 
 
@@ -189,6 +371,7 @@ def create_lead(data: dict, conn: sqlite3.Connection | None = None) -> tuple[int
         if existing:
             return existing["id"], False
         ts = now_iso()
+        actor = get_actor(conn, data)
         cur = conn.execute(
             "INSERT INTO leads(phone, source, channel, status, owner_id, created_at, updated_at) VALUES (?, ?, ?, 'NEW', ?, ?, ?)",
             (phone, source, channel, data.get("owner_id") or None, ts, ts),
@@ -197,6 +380,7 @@ def create_lead(data: dict, conn: sqlite3.Connection | None = None) -> tuple[int
             "INSERT INTO status_history(lead_id, from_status, to_status, changed_at, note) VALUES (?, NULL, 'NEW', ?, '新建线索')",
             (cur.lastrowid, ts),
         )
+        audit(conn, cur.lastrowid, actor["id"], "create_lead", f"新建线索：{source}/{channel}")
         if owns:
             conn.commit()
         return cur.lastrowid, True
@@ -212,6 +396,8 @@ def update_status(lead_id: int, data: dict) -> None:
         lead = conn.execute("SELECT * FROM leads WHERE id=?", (lead_id,)).fetchone()
         if not lead:
             raise LookupError("线索不存在")
+        actor = get_actor(conn, data)
+        ensure_lead_permission(lead, actor, "status")
         current = lead["status"]
         if target not in ALLOWED_TRANSITIONS.get(current, set()):
             raise ValueError(f"不允许从 {current} 直接流转到 {target}")
@@ -219,6 +405,8 @@ def update_status(lead_id: int, data: dict) -> None:
             raise ValueError("标记无效必须填写无效原因")
         if current == "INVALID" and target == "NEW" and len(note) < 4:
             raise ValueError("重新打开无效线索必须说明原因")
+        if current == "INVALID" and target == "NEW" and actor["role"] != "manager":
+            raise PermissionError("重新打开无效线索需主管操作")
         if target in {"MQL", "SQL"} and not lead["owner_id"]:
             raise ValueError("MQL/SQL 必须先分配负责人")
         if target == "MQL" and not lead["last_follow_up_at"]:
@@ -246,8 +434,15 @@ def update_status(lead_id: int, data: dict) -> None:
         )
         conn.execute(
             "INSERT INTO status_history(lead_id, from_status, to_status, changed_at, note) VALUES (?, ?, ?, ?, ?)",
-            (lead_id, current, target, ts, note or data.get("opportunity_note")),
+            (
+                lead_id,
+                current,
+                target,
+                ts,
+                note or data.get("opportunity_note") or f"操作人：{actor['name']}",
+            ),
         )
+        audit(conn, lead_id, actor["id"], "change_status", f"{current} -> {target}")
 
 
 def funnel() -> dict:
@@ -294,6 +489,7 @@ def natural_language_query(question: str) -> dict:
             return {
                 "answer": f"{best['channel']} 的 SQL 转化率最高，为 {best['sql_rate']}%。",
                 "definition": data["definition"],
+                "data_boundary": data["data_boundary"],
                 "rows": result,
             }
         if "超时" in q or ("48" in q and "跟进" in q):
@@ -301,6 +497,7 @@ def natural_language_query(question: str) -> dict:
             return {
                 "answer": f"当前有 {count} 条线索超过 48 小时未跟进。",
                 "definition": "排除 SQL/无效；按最近跟进时间，无跟进则按创建时间。",
+                "data_boundary": "这是行动提醒，不等同于销售绩效 SLA。",
                 "action": {"label": "查看超时线索", "filter": "overdue"},
             }
         if "漏斗" in q or "各状态" in q:
@@ -308,6 +505,7 @@ def natural_language_query(question: str) -> dict:
             return {
                 "answer": "已返回当前线索漏斗快照。",
                 "definition": "这是当前存量快照，不是按进入周期计算的 cohort 漏斗。",
+                "data_boundary": "生产分析应按创建批次、分配批次或首次到达阶段时间分 cohort。",
                 "rows": [{"status": k, "count": v} for k, v in data["counts"].items()],
             }
     return {
@@ -377,6 +575,7 @@ def execute_agent_tool(name: str, arguments: dict) -> dict:
         return {
             **data,
             "definition": "当前状态存量快照，不是按进入周期计算的 cohort 漏斗。",
+            "data_boundary": "生产环境应结合 status_history 计算首次到达各阶段的 cohort 漏斗。",
         }
     raise ValueError(f"不支持的 Agent 工具：{name}")
 
@@ -404,6 +603,7 @@ def process_call_callback(data: dict) -> dict:
         current = lead["status"]
         # 回调只负责外呼事实；若人工已推进到后续阶段，不允许旧回调把状态拉回。
         if current != "PENDING_CALL":
+            audit(conn, lead_id, None, "call_callback_ignored", f"{event_id} 在 {current} 状态不推进")
             return {
                 "ok": True,
                 "duplicate": False,
@@ -419,6 +619,7 @@ def process_call_callback(data: dict) -> dict:
             "INSERT INTO status_history(lead_id, from_status, to_status, changed_at, note) VALUES (?, ?, ?, ?, ?)",
             (lead_id, current, result, ts, f"外呼系统回调 event_id={event_id}"),
         )
+        audit(conn, lead_id, None, "call_callback", f"{current} -> {result}; event_id={event_id}")
     return {"ok": True, "duplicate": False, "status_changed": True}
 
 
@@ -489,9 +690,16 @@ class Handler(SimpleHTTPRequestHandler):
             if path.endswith("/assign") and path.startswith("/api/leads/"):
                 lead_id = int(path.split("/")[3])
                 with db() as conn:
-                    if not conn.execute("SELECT 1 FROM users WHERE id=?", (data.get("owner_id"),)).fetchone():
+                    lead = conn.execute("SELECT * FROM leads WHERE id=?", (lead_id,)).fetchone()
+                    if not lead:
+                        raise LookupError("线索不存在")
+                    actor = get_actor(conn, data)
+                    new_owner_id = data.get("owner_id")
+                    if not conn.execute("SELECT 1 FROM users WHERE id=?", (new_owner_id,)).fetchone():
                         raise ValueError("负责人不存在")
-                    conn.execute("UPDATE leads SET owner_id=?, updated_at=? WHERE id=?", (data["owner_id"], now_iso(), lead_id))
+                    ensure_lead_permission(lead, actor, "assign", int(new_owner_id))
+                    conn.execute("UPDATE leads SET owner_id=?, updated_at=? WHERE id=?", (new_owner_id, now_iso(), lead_id))
+                    audit(conn, lead_id, actor["id"], "assign_owner", f"负责人变更为 user_id={new_owner_id}")
                 return self._json({"ok": True})
             if path.endswith("/follow-ups") and path.startswith("/api/leads/"):
                 lead_id = int(path.split("/")[3])
@@ -503,7 +711,9 @@ class Handler(SimpleHTTPRequestHandler):
                     lead = conn.execute("SELECT owner_id FROM leads WHERE id=?", (lead_id,)).fetchone()
                     if not lead:
                         raise LookupError("线索不存在")
-                    operator = data.get("operator_id") or lead["owner_id"]
+                    actor = get_actor(conn, data)
+                    ensure_lead_permission(lead, actor, "follow_up")
+                    operator = actor["id"]
                     if not operator:
                         raise ValueError("请先分配负责人")
                     conn.execute(
@@ -511,6 +721,7 @@ class Handler(SimpleHTTPRequestHandler):
                         (lead_id, operator, content, data.get("next_action_at") or None, ts),
                     )
                     conn.execute("UPDATE leads SET last_follow_up_at=?, updated_at=? WHERE id=?", (ts, ts, lead_id))
+                    audit(conn, lead_id, actor["id"], "add_follow_up", content[:80])
                 return self._json({"ok": True}, HTTPStatus.CREATED)
             if path == "/api/import":
                 rows = data.get("rows", [])
@@ -521,6 +732,7 @@ class Handler(SimpleHTTPRequestHandler):
                 with db() as conn:
                     for i, row in enumerate(rows, 1):
                         try:
+                            row = {**row, "actor_id": data.get("actor_id")}
                             _, added = create_lead(row, conn)
                             created += int(added)
                             duplicates += int(not added)
@@ -544,6 +756,8 @@ class Handler(SimpleHTTPRequestHandler):
             return self._json({"error": "接口不存在"}, HTTPStatus.NOT_FOUND)
         except LookupError as exc:
             return self._json({"error": str(exc)}, HTTPStatus.NOT_FOUND)
+        except PermissionError as exc:
+            return self._json({"error": str(exc)}, HTTPStatus.FORBIDDEN)
         except (ValueError, KeyError, json.JSONDecodeError) as exc:
             return self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
         except Exception as exc:
